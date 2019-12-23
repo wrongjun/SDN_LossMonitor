@@ -37,10 +37,11 @@ class SimpleMonitor13(simple_switch_13.SimpleSwitch13):
         self.topo_raw_switches = []
         self.topo_raw_links = []
         self.monitor_thread = hub.spawn(self._monitor)
-        self.link =[]
+        self.links =[]
         self.maximumBandwidth ={}
         # Measure the number of package being transfer in each port of each switch
         self.totalOutPackage ={}
+        self.totalInPackage ={}
         self.avaliablePort={}
         self.specialPort={}
 
@@ -50,7 +51,10 @@ class SimpleMonitor13(simple_switch_13.SimpleSwitch13):
         self.preData = {}
         self.newData ={}
         self.resData={}
-        
+
+        self.combine_res = True
+        self.monitor_interval_time = 10
+
     def set_path(self,datapath,incoming,outgoing):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -89,6 +93,11 @@ class SimpleMonitor13(simple_switch_13.SimpleSwitch13):
             # match = parser.OFPMatch(in_port= 2)
             # self.add_flow(datapath, priority , match, actions)
 
+        if datapath.id == 3:
+            print('set path for s3')
+            self.set_path(datapath,1,2)
+            self.set_path(datapath,2,1)
+
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
         msg = ev.msg
@@ -110,62 +119,192 @@ class SimpleMonitor13(simple_switch_13.SimpleSwitch13):
                 self.logger.debug('unregister datapath: %016x', datapath.id)
                 del self.datapaths[datapath.id]
 
+
+    def reverse_match(self,a,b):
+        return((a[0] == b[1] and a[1] == b[0] and a[2]['port'] == b[2]['dst_port'] and a[2]['dst_port'] == b[2]['port']))
+
+
+    def process_raw_links(self,raw_links):
+        res_link = []
+        match={}
+        tmp_len = len(raw_links)
+        for i in range(0,tmp_len):
+            match[i] =True
+        for i in range(0,tmp_len):
+            match[i]=False
+            for x in range(i,tmp_len):
+                if (match[x]):
+                    if self.reverse_match(raw_links[i],raw_links[x]):
+                        match[x] = False
+                        res_link.append(raw_links[i])
+
+        return res_link
+
+
+    def info_links(self):
+        try:
+            print('from             port     to               port     send_pks send_bytes tx_pks tx_bytes loss_pks real_loss loss_bytes BW(MB/s) Max_BW congestion')
+            for x in self.links:
+                switch_id = x[0]
+                port = x[2]['port']
+                dst_id = x[1]
+                dst_port = x[2]['dst_port']
+                send_pk=self.totalOutPackage[switch_id][port]['packet_count'] + self.totalOutPackage[dst_id][dst_port]['packet_count']
+                send_by=self.totalOutPackage[switch_id][port]['tmp_byte_count'] + self.totalOutPackage[dst_id][dst_port]['tmp_byte_count']
+                # tx_pk =self.tx_msg[switch_id][port]['tx_packets']
+                # tx_by = self.tx_msg[switch_id][port]['tx_bytes']
+
+                # send_in_pk = self.totalInPackage[dst_id][dst_port]['packet_count']
+                # send_in_by = self.totalInPackage[dst_id][dst_port]['tmp_byte_count']
+
+                tx_pk =self.totalInPackage[switch_id][port]['packet_count'] + self.totalInPackage[dst_id][dst_port]['packet_count']
+                tx_by =self.totalInPackage[switch_id][port]['tmp_byte_count'] + self.totalInPackage[dst_id][dst_port]['tmp_byte_count']
+                # self.logger.info(send_in_pk)
+                # self.logger.info(tx_pk)
+                
+                
+
+                tmp_D = [send_pk,send_by,tx_pk,tx_by]
+                self.newData[switch_id][port]=tmp_D
+                tmp_pre = self.preData[switch_id][port]
+
+                tmp_res = [0,0,0,0]
+                for z in range(0,4):
+                    tmp_res[z] = tmp_D[z] - tmp_pre[z]
+                #print(self.resData)
+                loss_pk = tmp_res[0] - tmp_res[2]
+                loss_by = tmp_res[1] - tmp_res[3]
+                loss_by_rate=0
+                loss_pk_rate=0
+                actual_loss = 0.0
+                bandwidth = tmp_res[1] /self.monitor_interval_time/1000000
+
+                if ((loss_by<=0) | (tmp_res[3] <= 0 )):
+                    loss_by = 0.0000001
+                else:
+                    loss_by_rate = loss_by/tmp_res[3] *100
+
+
+                if ((tmp_res[0]<=0) | (loss_pk <= 0 )):
+                    loss_pk = 0.0000001
+                    actual_loss = 0.0000001
+                else:
+                    loss_pk_rate = loss_pk/tmp_res[0] *100
+                    actual_loss = (10000 - (100-loss_pk_rate) * (100-loss_pk_rate)) /100
+
+                if (1 / loss_pk < 0):
+                    loss_pk = 0.0000001
+                    loss_by = 0.0000001
+
+                congestion =0
+                if ((self.maximumBandwidth[switch_id][port]/1000000 * 0.98 )< bandwidth):
+                    congestion = 1
+                
+                self.logger.info('%016x %8x %016x %8x %8d %8d %8d %8d %2f %2f %2f %2f %8d %2d',
+                switch_id,port,x[1],x[2]['dst_port'],
+                tmp_res[0],tmp_res[1],tmp_res[2],tmp_res[3],loss_pk_rate,actual_loss,loss_by_rate,bandwidth,self.maximumBandwidth[switch_id][port],congestion)
+
+                self.preData[switch_id][port] = tmp_D
+
+            # self.preData[switch_id][port] = self.newData[switch_id][port]
+
+            # self.logger.info('%016x %8x %016x %8x %8d %8d %8d %8d %2f %2f',
+            # switch_id,port,x[1],x[2]['dst_port'],
+            # send_pk,send_by,tx_pk,tx_by,loss_pk,loss_by)
+            # self.logger.info(self.totalOutPackage)
+            # self.logger.info(self.totalInPackage)
+        except Exception as e: print(e)
+    
+
+    def info_raw_links(self):
+        try:
+            print('from             port     to               port     send_pks send_bytes tx_pks tx_bytes loss_pks loss_bytes')
+            for x in self.links:
+                switch_id = x[0]
+                port = x[2]['port']
+                dst_id = x[1]
+                dst_port = x[2]['dst_port']
+                send_pk=self.totalOutPackage[switch_id][port]['packet_count']
+                send_by=self.totalOutPackage[switch_id][port]['tmp_byte_count']
+                # tx_pk =self.tx_msg[switch_id][port]['tx_packets']
+                # tx_by = self.tx_msg[switch_id][port]['tx_bytes']
+
+                # send_in_pk = self.totalInPackage[dst_id][dst_port]['packet_count']
+                # send_in_by = self.totalInPackage[dst_id][dst_port]['tmp_byte_count']
+
+                tx_pk =self.totalInPackage[dst_id][dst_port]['packet_count']
+                tx_by = self.totalInPackage[dst_id][dst_port]['tmp_byte_count']
+                # self.logger.info(send_in_pk)
+                # self.logger.info(tx_pk)
+                
+                
+
+                tmp_D = [send_pk,send_by,tx_pk,tx_by]
+                self.newData[switch_id][port]=tmp_D
+                tmp_pre = self.preData[switch_id][port]
+
+                tmp_res = [0,0,0,0]
+                for z in range(0,4):
+                    tmp_res[z] = tmp_D[z] - tmp_pre[z]
+                #print(self.resData)
+                loss_pk = tmp_res[0] - tmp_res[2]
+                loss_by = tmp_res[1] - tmp_res[3]
+                loss_by_rate=0
+                loss_pk_rate=0
+
+                if ((loss_by<=0) | (tmp_res[3] <= 0 )):
+                    loss_by = 0.0000001
+                else:
+                    loss_by_rate = loss_by/tmp_res[3] *100
+
+                if ((tmp_res[0]<=0) | (loss_pk <= 0 )):
+                    loss_pk = 0.0000001
+                else:
+                    loss_pk_rate = loss_pk/tmp_res[0] *100
+
+
+                
+                if (1 / loss_pk < 0):
+                    loss_pk = 0.0000001
+                    loss_by = 0.0000001
+                
+                self.logger.info('%016x %8x %016x %8x %8d %8d %8d %8d %2f %2f',
+                switch_id,port,x[1],x[2]['dst_port'],
+                tmp_res[0],tmp_res[1],tmp_res[2],tmp_res[3],loss_pk_rate,loss_by_rate)
+
+                self.preData[switch_id][port] = tmp_D
+
+            # self.preData[switch_id][port] = self.newData[switch_id][port]
+
+            # self.logger.info('%016x %8x %016x %8x %8d %8d %8d %8d %2f %2f',
+            # switch_id,port,x[1],x[2]['dst_port'],
+            # send_pk,send_by,tx_pk,tx_by,loss_pk,loss_by)
+            # self.logger.info(self.totalOutPackage)
+            # self.logger.info(self.totalInPackage)
+        except Exception as e: print(e)
+
+
     def _monitor(self):
         while True:
             self.transferData =""
-
-            print('-----------link topology--------------')
-            self.links=[(link.src.dpid,link.dst.dpid,{'port':link.src.port_no,'dst_port':link.dst.port_no}) for link in self.topo_raw_links]
-            print(self.links)
-            #print(self.totalOutPackage)
-            print('----------------topology end---------------')
-            
             for dp in self.datapaths.values():
                 self._request_stats(dp)
+    
+            # print('-----------link topology--------------')
+            raw_links=[(link.src.dpid,link.dst.dpid,{'port':link.src.port_no,'dst_port':link.dst.port_no}) for link in self.topo_raw_links]
+            match={}
+            if (self.combine_res):
+                self.links = self.process_raw_links(raw_links)
+                self.info_links()
+            else:
+                self.links = raw_links
+                self.info_raw_links()
 
-            try:
+            # #print(self.totalOutPackage)
+            # print('----------------topology end---------------')
+            
 
-                print('from             port     to               port     send_pks send_bytes tx_pks tx_bytes loss_pks loss_bytes')
-                for x in self.links:
-                    switch_id = x[0]
-                    port = x[2]['port']
-                    send_pk=self.totalOutPackage[switch_id][port]['packet_count']
-                    send_by=self.totalOutPackage[switch_id][port]['tmp_byte_count']
-                    tx_pk =self.tx_msg[switch_id][port]['tx_packets']
-                    tx_by = self.tx_msg[switch_id][port]['tx_bytes']
-
-                    tmp_D = [send_pk,send_by,tx_pk,tx_by]
-                    self.newData[switch_id][port]=tmp_D
-                    tmp_pre = self.preData[switch_id][port]
-
-                    tmp_res = [0,0,0,0]
-                    for z in range(0,4):
-                        tmp_res[z] = tmp_D[z] - tmp_pre[z]
-                    #print(self.resData)
-                    loss_pk = (tmp_res[0] - tmp_res[2])/tmp_res[0] *100
-                    loss_by = (tmp_res[1] - tmp_res[3])/tmp_res[3] *100
-                    if ((tmp_res[0])<100):
-                        loss_pk = 0.0000001
-                        loss_by = 0.0000001
-                    if (1 / loss_pk < 0):
-                        loss_pk = 0.0000001
-                        loss_by = 0.0000001
-                    
-                    self.logger.info('%016x %8x %016x %8x %8d %8d %8d %8d %2f %2f',
-                    switch_id,port,x[1],x[2]['dst_port'],
-                    tmp_res[0],tmp_res[1],tmp_res[2],tmp_res[3],loss_pk,loss_by)
-
-                    self.preData[switch_id][port] = tmp_D
-
-                # self.preData[switch_id][port] = self.newData[switch_id][port]
-
-                # self.logger.info('%016x %8x %016x %8x %8d %8d %8d %8d %2f %2f',
-                # switch_id,port,x[1],x[2]['dst_port'],
-                # send_pk,send_by,tx_pk,tx_by,loss_pk,loss_by)
-            except:
-                print('error')
-
-            hub.sleep(10)
+            hub.sleep(self.monitor_interval_time)
 
     def _request_stats(self, datapath):
         self.logger.debug('send stats request: %016x', datapath.id)
@@ -176,7 +315,7 @@ class SimpleMonitor13(simple_switch_13.SimpleSwitch13):
         datapath.send_msg(req)
 
         req = parser.OFPPortStatsRequest(datapath, 0, ofproto.OFPP_ANY)
-        datapath.send_msg(req)
+        #datapath.send_msg(req)
 
         req = parser.OFPPortDescStatsRequest(datapath, 0,)
         datapath.send_msg(req)
@@ -249,19 +388,23 @@ class SimpleMonitor13(simple_switch_13.SimpleSwitch13):
         #datapath.send_msg(req)
 
 
-        print(" \t" + "Current Switches:")
-        for s in self.topo_raw_switches:
-            print (" \t\t" + str(s))
+        # print(" \t" + "Current Switches:")
+        # for s in self.topo_raw_switches:
+        #     print (" \t\t" + str(s))
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def flow_stats_reply_handler(self, ev):
         flows = []
         tmp = {} 
+        tmp_in={}
        
         for i in self.avaliablePort[ev.msg.datapath.id]:
             tmp_packet_count = 0
             tmp_byte_count = 0
+            tmp_in_packet_count = 0
+            tmp_in_byte_count = 0
             for stat in ev.msg.body:
+
                 # print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>.')
                 #flows.append('packet_count=%d byte_count=%d '
                 #            'instructions=%s' %
@@ -273,12 +416,23 @@ class SimpleMonitor13(simple_switch_13.SimpleSwitch13):
                 # print(str(stat.instructions[0]).find('port='+ str(i)))
                 # print('-----------------')
                 #4294967293 is the going to all port
-                if ((str(stat.instructions[0]).find('port='+ str(i))!=-1) | (str(stat.instructions[0]).find('port='+ str(4294967293))!=-1)):
+                if ((str(stat.match).find('\'in_port\': '+str(i))!=-1) ):
+                    tmp_in_packet_count += stat.packet_count
+                    tmp_in_byte_count += stat.byte_count
+                if ((str(stat.instructions[0]).find('port='+ str(i))!=-1)):
                     tmp_packet_count += stat.packet_count
                     tmp_byte_count += stat.byte_count
+                # if ((str(stat.match).find('\'in_port\': '+str(i))!=-1) | (str(stat.match).find('\'eth_dst\': \'01:80:c2:00:00:0e\', \'eth_type\': 35020')!=-1)):
+                #     tmp_in_packet_count += stat.packet_count
+                #     tmp_in_byte_count += stat.byte_count
+                # if ((str(stat.instructions[0]).find('port='+ str(i))!=-1) | (str(stat.instructions[0]).find('port='+ str(4294967293))!=-1)):
+                #     tmp_packet_count += stat.packet_count
+                #     tmp_byte_count += stat.byte_count
                 # print('<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
             tmp[i]={'packet_count':tmp_packet_count,'tmp_byte_count':tmp_byte_count}
+            tmp_in[i]={'packet_count':tmp_in_packet_count,'tmp_byte_count':tmp_in_byte_count}
         self.totalOutPackage[ev.msg.datapath.id]=tmp
+        self.totalInPackage[ev.msg.datapath.id]=tmp_in
         #self.logger.info('FlowStats: %s', flows)
 
     """

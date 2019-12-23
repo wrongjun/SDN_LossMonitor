@@ -30,11 +30,15 @@ class MyTopo(Topo):
         rightHost = self.addHost('h2')
         leftSwitch = self.addSwitch('s1',protocols='OpenFlow13')
         rightSwitch = self.addSwitch('s2',protocols='OpenFlow13')
+        ms = self.addSwitch('s3',protocols='OpenFlow13')
         #middleSwitch = self.addSwitch('s3',protocols='OpenFlow13')
 
         # Add links
         self.addLink(leftHost, leftSwitch,bw=100)
-        self.addLink(leftSwitch, rightSwitch,bw=100,loss=5)
+        # self.addLink(leftSwitch, rightSwitch,bw=100,loss=5)
+        # self.addLink(leftSwitch, rightSwitch,bw=100,loss=5)
+        self.addLink(leftSwitch, ms,bw=100,loss=5)
+        self.addLink(ms, rightSwitch,bw=100)
         self.addLink(rightSwitch, rightHost,bw=100)
         #self.addLink(leftSwitch, middleSwitch,bw=100)
         #self.addLink(middleSwitch, rightSwitch,bw=100)
